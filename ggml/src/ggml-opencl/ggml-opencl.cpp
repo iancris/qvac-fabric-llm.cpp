@@ -3474,6 +3474,7 @@ inline bool use_adreno_kernels(const ggml_backend_opencl_context *backend_ctx, c
         threshold_ne1 = 128;
     }
     return tensor->ne[0] >= threshold_ne0 && tensor->ne[1] >= threshold_ne1 &&
+            tensor->ne[0] % 32 == 0 && tensor->ne[1] % 4 == 0 &&
             tensor->ne[2] == 1 && tensor->ne[3] == 1;
 }
 
