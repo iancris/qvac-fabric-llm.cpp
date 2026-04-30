@@ -265,10 +265,14 @@ __kernel void kernel_gemv_noshuffle(
     if (groupId == 0) totalSum += reduceLM[SIMDGROUP_WIDTH * 1 + slid];
     if (groupId == 0) totalSum += reduceLM[SIMDGROUP_WIDTH * 2 + slid];
 
-    // 2 outputs per fiber in wave 0
+    // 2 outputs per fiber in wave 0 (ne0 = original M before padding)
     if (groupId == 0) {
         dst = (global float*)((global char*)dst + offsetd);
-        vstore2(totalSum, 0, &(dst[gid * 2]));
+        if (gid * 2 + 1 < ne0) {
+            vstore2(totalSum, 0, &(dst[gid * 2]));
+        } else if (gid * 2 < ne0) {
+            dst[gid * 2] = totalSum.s0;
+        }
     }
 
 }

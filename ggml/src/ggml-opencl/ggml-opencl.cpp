@@ -2664,6 +2664,8 @@ struct ggml_tensor_extra_cl_q4_0 {
     size_t size_q = 0;
     // Size of scales.
     size_t size_d = 0;
+    // Padded ne01 (M dimension, rounded up to multiple of 4 for Adreno transpose alignment).
+    int padded_ne01 = 0;
 
     ~ggml_tensor_extra_cl_q4_0() {
         reset();
@@ -2689,6 +2691,7 @@ struct ggml_tensor_extra_cl_q4_0 {
         d_img = nullptr;
         size_q = 0;
         size_d = 0;
+        padded_ne01 = 0;
     }
 };
 
@@ -3474,7 +3477,7 @@ inline bool use_adreno_kernels(const ggml_backend_opencl_context *backend_ctx, c
         threshold_ne1 = 128;
     }
     return tensor->ne[0] >= threshold_ne0 && tensor->ne[1] >= threshold_ne1 &&
-            tensor->ne[0] % 32 == 0 && tensor->ne[1] % 4 == 0 &&
+            tensor->ne[0] % 32 == 0 &&
             tensor->ne[2] == 1 && tensor->ne[3] == 1;
 }
 
@@ -3505,6 +3508,7 @@ static void ggml_backend_opencl_buffer_set_tensor(ggml_backend_buffer_t buffer, 
         // Allocate the new extra and create aliases from the original.
         ggml_backend_opencl_buffer_context * ctx = (ggml_backend_opencl_buffer_context *) buffer->context;
         ggml_tensor_extra_cl_q4_0 * extra = ctx->ggml_opencl_alloc_temp_tensor_extra_q4_0();
+        extra->padded_ne01 = tensor->ne[1];
 
         size_t size_d = ggml_nelements(tensor)/ggml_blck_size(tensor->type)*sizeof(ggml_fp16_t);
         size_t size_q = ggml_nelements(tensor)/ggml_blck_size(tensor->type)*ggml_blck_size(tensor->type)/2;
@@ -3589,11 +3593,41 @@ static void ggml_backend_opencl_buffer_set_tensor(ggml_backend_buffer_t buffer, 
         // <----------------------------------------------------------------------------------> //
         int M = tensor->ne[1];   // ne01
         int K = tensor->ne[0];   // ne00
+        int M_padded = (M + 3) & ~3;
 
-        //For matrix-vector multiplication kernel, we assume K is a multiple of 32
         GGML_ASSERT(K % 32 == 0);
-        //For transpose kernels, we assume K is a multiple of 4 (satisfied by prior assert), and M is a multiple of 4
-        GGML_ASSERT(M % 4 == 0);
+
+        // Pad M to multiple of 4 for transpose kernel alignment
+        if (M_padded != M) {
+            size_t orig_size_q = (size_t)K * M / 2;
+            size_t orig_size_d = (size_t)M * (K / 32) * 2;
+            size_t pad_size_q = (size_t)K * M_padded / 2;
+            size_t pad_size_d = (size_t)M_padded * (K / 32) * 2;
+
+            cl_mem padded_q = clCreateBuffer(context, CL_MEM_READ_WRITE, pad_size_q, NULL, &err);
+            CL_CHECK(err);
+            cl_mem padded_d = clCreateBuffer(context, CL_MEM_READ_WRITE, pad_size_d, NULL, &err);
+            CL_CHECK(err);
+
+            CL_CHECK(clEnqueueCopyBuffer(queue, extra->q, padded_q, 0, 0, orig_size_q, 0, NULL, &evt));
+            CL_CHECK(clWaitForEvents(1, &evt));
+            CL_CHECK(clEnqueueCopyBuffer(queue, extra->d, padded_d, 0, 0, orig_size_d, 0, NULL, &evt));
+            CL_CHECK(clWaitForEvents(1, &evt));
+
+            cl_uchar zero = 0;
+            CL_CHECK(clEnqueueFillBuffer(queue, padded_q, &zero, 1, orig_size_q, pad_size_q - orig_size_q, 0, NULL, &evt));
+            CL_CHECK(clWaitForEvents(1, &evt));
+            CL_CHECK(clEnqueueFillBuffer(queue, padded_d, &zero, 1, orig_size_d, pad_size_d - orig_size_d, 0, NULL, &evt));
+            CL_CHECK(clWaitForEvents(1, &evt));
+
+            CL_CHECK(clReleaseMemObject(extra->q));
+            CL_CHECK(clReleaseMemObject(extra->d));
+            extra->q = padded_q;
+            extra->d = padded_d;
+            extra->padded_ne01 = M_padded;
+        }
+
+        M = M_padded;
 
         // transpose is out of place, so we need to allocate transposed buffers
         // <----------------------------------------------------------------------------------> //
@@ -7244,6 +7278,7 @@ static void ggml_cl_mul_mat(ggml_backend_t backend, const ggml_tensor * src0, co
     // define matrix dimensions
     // <--------------------------------------------> //
     int M = ne01;
+    int M_padded = ne01;
     int N = ne1;
     int K = ne00;
     int padding;
@@ -7251,7 +7286,8 @@ static void ggml_cl_mul_mat(ggml_backend_t backend, const ggml_tensor * src0, co
 
     // q4_0 x fp32
     if(src0t == GGML_TYPE_Q4_0 && src1t == GGML_TYPE_F32) {
-        // TODO: remove duplicate definitions of image description + format -- move to top
+        M_padded = extra0_q4_0->padded_ne01;
+        M = M_padded;
 
         // create an image for A
         // <--------------------------------------------> //
@@ -7428,7 +7464,7 @@ static void ggml_cl_mul_mat(ggml_backend_t backend, const ggml_tensor * src0, co
             CL_CHECK(clSetKernelArg(kernel,  k_arg++, sizeof(cl_mem),   &extrad->data_device));
             CL_CHECK(clSetKernelArg(kernel,  k_arg++, sizeof(cl_ulong), &extrad->offset));
             CL_CHECK(clSetKernelArg(kernel,  k_arg++, sizeof(int),      &ne00));
-            CL_CHECK(clSetKernelArg(kernel,  k_arg++, sizeof(int),      &ne01));
+            CL_CHECK(clSetKernelArg(kernel,  k_arg++, sizeof(int),      &M_padded));
             CL_CHECK(clSetKernelArg(kernel,  k_arg++, sizeof(int),      &ne02));
             CL_CHECK(clSetKernelArg(kernel,  k_arg++, sizeof(int),      &ne10));
             CL_CHECK(clSetKernelArg(kernel,  k_arg++, sizeof(int),      &ne12));
@@ -7438,7 +7474,7 @@ static void ggml_cl_mul_mat(ggml_backend_t backend, const ggml_tensor * src0, co
             CL_CHECK(clSetKernelArg(kernel,  k_arg++, sizeof(int),      &r3));
         } else {
             region.origin = extrad->offset; // Specify the starting offset (in bytes)
-            region.size = M * N * sizeof(float); // Specify the size of the sub-buffer
+            region.size = ne01 * N * sizeof(float); // Specify the size of the sub-buffer
             C_d = clCreateSubBuffer(extrad->data_device, CL_MEM_WRITE_ONLY, CL_BUFFER_CREATE_TYPE_REGION, &region, &status);
             CL_CHECK(status);
 
@@ -7448,10 +7484,11 @@ static void ggml_cl_mul_mat(ggml_backend_t backend, const ggml_tensor * src0, co
             CL_CHECK(clSetKernelArg(kernel, 1, sizeof(cl_mem), &extra0_q4_0->d)); //A_s_d
             CL_CHECK(clSetKernelArg(kernel, 2, sizeof(cl_mem), &B_image1d)); //B_d
             CL_CHECK(clSetKernelArg(kernel, 3, sizeof(cl_mem), &C_d)); //C_d
-            CL_CHECK(clSetKernelArg(kernel, 4, sizeof(int),    &ne01)); //M
+            CL_CHECK(clSetKernelArg(kernel, 4, sizeof(int),    &ne01)); //M (original, for output)
             CL_CHECK(clSetKernelArg(kernel, 5, sizeof(int),    &padded_N)); //N with padding
             CL_CHECK(clSetKernelArg(kernel, 6, sizeof(int),    &ne00)); //K
             CL_CHECK(clSetKernelArg(kernel, 7, sizeof(int),    &ne1)); //N without padding
+            CL_CHECK(clSetKernelArg(kernel, 8, sizeof(int),    &M_padded)); //M padded (for weight stride)
         }
         // <--------------------------------------------> //
 
@@ -7460,10 +7497,6 @@ static void ggml_cl_mul_mat(ggml_backend_t backend, const ggml_tensor * src0, co
         size_t global_work_size[3] = {
             64, static_cast<size_t>((M+63)/64), static_cast<size_t>((N+31)/32)};
         size_t local_work_size[3] = {64, 2, 4};
-
-        global_work_size[0] = (size_t)(ceil((float)ne1/8));
-        global_work_size[1] = (size_t)(ne01/4);
-        global_work_size[2] = (size_t)(1);
 
         local_work_size[0]  = (size_t)(1); //4x32 for FP32
         local_work_size[1]  = (size_t)(128);
@@ -7483,6 +7516,12 @@ static void ggml_cl_mul_mat(ggml_backend_t backend, const ggml_tensor * src0, co
             local_work_size[0] = 2;
             local_work_size[1] = 64;
         }
+
+        size_t m_groups = (size_t)((M_padded + 3) / 4);
+        size_t lws1 = local_work_size[1];
+        global_work_size[0] = (size_t)(ceil((float)ne1/8));
+        global_work_size[1] = ((m_groups + lws1 - 1) / lws1) * lws1;
+        global_work_size[2] = (size_t)(1);
 
         if (N == 1) {
             size_t wavesize = backend_ctx->adreno_wave_size;
