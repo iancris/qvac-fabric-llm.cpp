@@ -70,7 +70,16 @@ ggml_cgraph * clip_graph_qwen3vl::build() {
     }
 
     // deepstack features (stack along the feature dimension), [n_embd * len(deepstack_layers), n_patches_x * n_patches_y, batch_size]
+    // QVAC-18297 U1 (Cost-S): the buffer is pre-allocated on the first
+    // deepstack layer (when we know d_ds = feat->ne[0]) and each subsequent
+    // layer writes its slice in-place via ggml_set_inplace. This replaces
+    // the previous ggml_concat chain, which allocated a growing intermediate
+    // tensor on every deepstack layer (O(N^2) memory churn for N
+    // deepstack_layers; on iPhone the per-layer reallocation is the leading
+    // suspect for the 183ms projection vs 2ms on Mac M4). Same pattern is
+    // used in src/models/delta-net-base.cpp:261.
     ggml_tensor * deepstack_features = nullptr;
+    int deepstack_idx = 0;
     const int merge_factor = hparams.n_merge > 0 ? hparams.n_merge * hparams.n_merge : 4; // default 2x2=4 for qwen3vl
 
     // loop over layers
@@ -156,12 +165,32 @@ ggml_cgraph * clip_graph_qwen3vl::build() {
                 layer.deepstack_fc2_w, layer.deepstack_fc2_b,
                 ffn_op_type::FFN_GELU, il);
 
-            if(!deepstack_features) {
-                deepstack_features = feat;
-            } else {
-                // concat along the feature dimension
-                deepstack_features = ggml_concat(ctx0, deepstack_features, feat, 0);
+            if (deepstack_features == nullptr) {
+                // Allocate the full deepstack output once we know d_ds =
+                // feat->ne[0] (the deepstack_fc2 output dim). All deepstack
+                // layers in a model have the same d_ds, so this is stable
+                // across iterations. Total dim along ne[0] is
+                // d_ds * model.n_deepstack_layers.
+                const int64_t d_ds_total =
+                    feat->ne[0] * model.n_deepstack_layers;
+                deepstack_features = ggml_new_tensor_3d(
+                    ctx0, feat->type, d_ds_total, feat->ne[1], feat->ne[2]);
             }
+            // Write feat into its slice along dim 0:
+            //   slice = deepstack_features[idx*d_ds : (idx+1)*d_ds, :, :]
+            // ggml_set_inplace returns a view of the same underlying buffer
+            // so the next iteration writes into the same allocation; the
+            // graph allocator tracks the dependency chain through the
+            // returned view.
+            const size_t offset = (size_t)deepstack_idx * feat->ne[0]
+                                  * ggml_element_size(deepstack_features);
+            deepstack_features = ggml_set_inplace(
+                ctx0, deepstack_features, feat,
+                deepstack_features->nb[1],
+                deepstack_features->nb[2],
+                deepstack_features->nb[3],
+                offset);
+            deepstack_idx++;
         }
 
         inpL = cur;
