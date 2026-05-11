@@ -159,8 +159,18 @@ void llama_memory_hybrid::seq_div(llama_seq_id seq_id, llama_pos p0, llama_pos p
 }
 
 llama_pos llama_memory_hybrid::seq_pos_min(llama_seq_id seq_id) const {
-    // the min of the total cache is the max of the two caches' min values
-    return std::max(mem_attn->seq_pos_min(seq_id), mem_recr->seq_pos_min(seq_id));
+    const auto attn_min = mem_attn->seq_pos_min(seq_id);
+    const auto recr_min = mem_recr->seq_pos_min(seq_id);
+
+    if (attn_min < 0 || recr_min < 0) {
+        return std::max(attn_min, recr_min);
+    }
+
+    // Both caches have state. The recurrent state is a running summary
+    // covering all positions from 0 to recr_pos_max — its pos_min does
+    // not represent the start of coverage. The attention cache's min is
+    // the true constraint on reusable prefix.
+    return attn_min;
 }
 
 llama_pos llama_memory_hybrid::seq_pos_max(llama_seq_id seq_id) const {
