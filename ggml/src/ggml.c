@@ -1034,6 +1034,7 @@ static const char * GGML_OP_NAME[GGML_OP_COUNT] = {
     "RWKV_WKV7",
     "DELTA_NET_AR",
     "SOLVE_TRI",
+    "GATED_DELTA_NET",
 
     "UNARY",
 
@@ -1053,7 +1054,7 @@ static const char * GGML_OP_NAME[GGML_OP_COUNT] = {
     "GLU",
 };
 
-static_assert(GGML_OP_COUNT == 100, "GGML_OP_COUNT != 100");
+static_assert(GGML_OP_COUNT == 101, "GGML_OP_COUNT != 101");
 
 static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "none",
@@ -1167,7 +1168,7 @@ static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "glu(x)",
 };
 
-static_assert(GGML_OP_COUNT == 100, "GGML_OP_COUNT != 100");
+static_assert(GGML_OP_COUNT == 101, "GGML_OP_COUNT != 101");
 
 static_assert(GGML_OP_POOL_COUNT == 2, "GGML_OP_POOL_COUNT != 2");
 
@@ -6266,6 +6267,54 @@ struct ggml_tensor * ggml_solve_tri(
     result->op     = GGML_OP_SOLVE_TRI;
     result->src[0] = a;
     result->src[1] = b;
+
+    return result;
+}
+
+// ggml_gated_delta_net
+
+struct ggml_tensor * ggml_gated_delta_net(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * q,
+        struct ggml_tensor  * k,
+        struct ggml_tensor  * v,
+        struct ggml_tensor  * g,
+        struct ggml_tensor  * beta,
+        struct ggml_tensor  * state) {
+    GGML_ASSERT(ggml_is_contiguous_rows(q));
+    GGML_ASSERT(ggml_is_contiguous_rows(k));
+    GGML_ASSERT(ggml_is_contiguous_rows(v));
+    GGML_ASSERT(ggml_is_contiguous(g));
+    GGML_ASSERT(ggml_is_contiguous(beta));
+    GGML_ASSERT(ggml_is_contiguous(state));
+
+    GGML_ASSERT(q->type == GGML_TYPE_F32);
+    GGML_ASSERT(k->type == GGML_TYPE_F32);
+    GGML_ASSERT(v->type == GGML_TYPE_F32);
+    GGML_ASSERT(g->type == GGML_TYPE_F32);
+    GGML_ASSERT(beta->type == GGML_TYPE_F32);
+    GGML_ASSERT(state->type == GGML_TYPE_F32);
+
+    const int64_t S_v      = v->ne[0];
+    const int64_t H        = v->ne[1];
+    const int64_t n_tokens = v->ne[2];
+    const int64_t n_seqs   = v->ne[3];
+
+    GGML_ASSERT(g->ne[0] == 1 || g->ne[0] == S_v);
+    GGML_ASSERT(beta->ne[0] == 1);
+
+    GGML_ASSERT(ggml_nelements(state) == S_v * S_v * H * n_seqs);
+
+    const int64_t ne[4] = { S_v * H, n_tokens * n_seqs + S_v * n_seqs, 1, 1 };
+    struct ggml_tensor * result = ggml_new_tensor(ctx, GGML_TYPE_F32, 4, ne);
+
+    result->op     = GGML_OP_GATED_DELTA_NET;
+    result->src[0] = q;
+    result->src[1] = k;
+    result->src[2] = v;
+    result->src[3] = g;
+    result->src[4] = beta;
+    result->src[5] = state;
 
     return result;
 }

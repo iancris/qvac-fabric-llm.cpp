@@ -384,3 +384,44 @@ std::pair<ggml_tensor *, ggml_tensor *> llm_build_delta_net_base::build_delta_ne
     o = ggml_permute(ctx0, o, 0, 2, 1, 3); // [S, 1, H, N] -> [S, H, 1, N]
     return {o, s_new};
 }
+
+std::pair<ggml_tensor *, ggml_tensor *> llm_build_delta_net_base::build_delta_net_fused(
+        ggml_tensor * q,
+        ggml_tensor * k,
+        ggml_tensor * v,
+        ggml_tensor * g,
+        ggml_tensor * b,
+        ggml_tensor * s,
+        int           il) {
+    const int64_t S_v      = v->ne[0];
+    const int64_t H_v      = v->ne[1];
+    const int64_t n_tokens = v->ne[2];
+    const int64_t n_seqs   = v->ne[3];
+
+    GGML_ASSERT(S_v % 32 == 0);
+
+    ggml_tensor * s_t = ggml_cont(ctx0, ggml_transpose(ctx0, s));
+    cb(s_t, "gdn_state_t", il);
+
+    ggml_tensor * fused = ggml_gated_delta_net(ctx0, q, k, v, g, b, s_t);
+    cb(fused, "gdn_fused", il);
+
+    ggml_tensor * o = ggml_view_4d(ctx0, fused,
+            S_v, H_v, n_tokens, n_seqs,
+            sizeof(float) * S_v,
+            sizeof(float) * S_v * H_v,
+            sizeof(float) * S_v * H_v * n_tokens,
+            0);
+
+    ggml_tensor * s_new_gdn = ggml_view_4d(ctx0, fused,
+            S_v, S_v, H_v, n_seqs,
+            sizeof(float) * S_v,
+            sizeof(float) * S_v * S_v,
+            sizeof(float) * S_v * S_v * H_v,
+            sizeof(float) * S_v * H_v * n_tokens * n_seqs);
+
+    ggml_tensor * s_new = ggml_transpose(ctx0, s_new_gdn);
+    cb(s_new, "gdn_state_out", il);
+
+    return {o, s_new};
+}

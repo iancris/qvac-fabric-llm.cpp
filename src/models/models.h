@@ -44,6 +44,16 @@ struct llm_build_delta_net_base : public llm_graph_context {
                 ggml_tensor * b,
                 ggml_tensor * s,
                 int           il);
+
+    // fused GDN path using ggml_gated_delta_net (runs on Metal)
+    std::pair<ggml_tensor *, ggml_tensor *> build_delta_net_fused(
+                ggml_tensor * q,
+                ggml_tensor * k,
+                ggml_tensor * v,
+                ggml_tensor * g,
+                ggml_tensor * b,
+                ggml_tensor * s,
+                int           il);
 };
 
 struct llm_build_rwkv6_base : public llm_graph_context {

@@ -559,6 +559,7 @@ extern "C" {
         GGML_OP_RWKV_WKV7,
         GGML_OP_DELTA_NET_AR,
         GGML_OP_SOLVE_TRI,
+        GGML_OP_GATED_DELTA_NET,
 
         GGML_OP_UNARY,
 
@@ -2501,6 +2502,15 @@ extern "C" {
         bool                  left,
         bool                  lower,
         bool                  uni);
+
+    GGML_API struct ggml_tensor * ggml_gated_delta_net(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * q,
+            struct ggml_tensor  * k,
+            struct ggml_tensor  * v,
+            struct ggml_tensor  * g,
+            struct ggml_tensor  * beta,
+            struct ggml_tensor  * state);
 
     // custom operators
 
