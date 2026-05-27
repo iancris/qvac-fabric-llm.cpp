@@ -838,6 +838,14 @@ static void llama_model_quantize_impl(const std::string & fname_inp, const std::
 
         // do not quantize specific multimodal tensors
         quantize &= name.find(".position_embd.") == std::string::npos;
+        quantize &= name.find("sam.pos_embd")    == std::string::npos;
+        quantize &= name.find("sam.neck.")        == std::string::npos;
+        quantize &= name.find("sam.net_")         == std::string::npos;
+        quantize &= name.find(".rel_pos")         == std::string::npos;
+        quantize &= name.find(".patch_embd")      == std::string::npos;
+        quantize &= name.find(".patch_merger")    == std::string::npos;
+        quantize &= name.find(".conv_dw.")        == std::string::npos;
+        quantize &= name.find(".conv1d.")         == std::string::npos;
 
         ggml_type new_type;
         void * new_data;
@@ -902,6 +910,7 @@ static void llama_model_quantize_impl(const std::string & fname_inp, const std::
                             case GGML_TYPE_Q4_K:   new_type = GGML_TYPE_Q5_0;   break;
                             case GGML_TYPE_Q5_K:   new_type = GGML_TYPE_Q5_1;   break;
                             case GGML_TYPE_Q6_K:   new_type = GGML_TYPE_Q8_0;   break;
+                            case GGML_TYPE_Q8_0:   new_type = GGML_TYPE_F16;    break;
                             default: throw std::runtime_error("\nUnsupported tensor size encountered\n");
                         }
                         if (tensor->ne[0] % ggml_blck_size(new_type) != 0) {
