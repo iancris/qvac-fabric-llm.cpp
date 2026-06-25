@@ -2516,6 +2516,11 @@ struct clip_model_loader {
     static void warmup(clip_ctx & ctx_clip, const clip_image_f32_batch & batch) {
         support_info_graph info;
 
+        // QVAC-21257 iter1 (diagnostic): force-disable flash attention to test explicit-softmax
+        // attention on Mali. Profiling showed FA_SCALAR is the single biggest op at only ~38 GFLOPS/s
+        // (2.6x worse than the ~100 GFLOPS/s matmul path); explicit QK^T/AV go through that matmul path.
+        ctx_clip.flash_attn_type = CLIP_FLASH_ATTN_TYPE_DISABLED;
+
         if (ctx_clip.flash_attn_type == CLIP_FLASH_ATTN_TYPE_AUTO) {
             // try to enable flash attention to see if it's supported
             ctx_clip.flash_attn_type = CLIP_FLASH_ATTN_TYPE_ENABLED;
