@@ -2516,10 +2516,15 @@ struct clip_model_loader {
     static void warmup(clip_ctx & ctx_clip, const clip_image_f32_batch & batch) {
         support_info_graph info;
 
-        // QVAC-21257 iter1 (diagnostic): force-disable flash attention to test explicit-softmax
-        // attention on Mali. Profiling showed FA_SCALAR is the single biggest op at only ~38 GFLOPS/s
-        // (2.6x worse than the ~100 GFLOPS/s matmul path); explicit QK^T/AV go through that matmul path.
-        ctx_clip.flash_attn_type = CLIP_FLASH_ATTN_TYPE_DISABLED;
+        // QVAC-21257 iter1b: disable flash attention only when the projector runs on a GPU backend.
+        // Mali has no coopmat FA fast-path, so FA_SCALAR is ~2x less efficient than the explicit
+        // QK^T/softmax/AV matmul path (profiling run #78: FA 38 GFLOPS/s vs matmul ~100; encode -24%).
+        // Keep FA on CPU, whose FA kernel is efficient. NOTE: this gates on GPU-vs-CPU, not on FA
+        // efficiency — a coopmat-capable GPU (fast FA) would also be disabled here; a production fix
+        // should gate on coopmat/FA-support quality instead.
+        if (ctx_clip.backend && ctx_clip.backend != ctx_clip.backend_cpu) {
+            ctx_clip.flash_attn_type = CLIP_FLASH_ATTN_TYPE_DISABLED;
+        }
 
         if (ctx_clip.flash_attn_type == CLIP_FLASH_ATTN_TYPE_AUTO) {
             // try to enable flash attention to see if it's supported
