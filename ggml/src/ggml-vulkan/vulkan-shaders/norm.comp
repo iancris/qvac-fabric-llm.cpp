@@ -1,44 +1,112 @@
 #version 450
 
-#include "generic_head.glsl"
+#include "generic_binary_head.glsl"
 #include "types.glsl"
 
 #extension GL_EXT_control_flow_attributes : enable
 #define BLOCK_SIZE 512
 
+// binding 0 = A (input), binding 1 = B (weight), binding 2 = C (bias),
+// binding 3 = D (output). NORM_MUL_ADD_FUSION tells generic_binary_head.glsl
+// to skip its own binding-2 (D) declaration so we can place the bias there and
+// move the output to binding 3 (mirrors the dispatch order src0/src1/src2/dst).
+layout (binding = 2) readonly buffer C {B_TYPE data_c[];};
+layout (binding = 3) writeonly buffer D {D_TYPE data_d[];};
+
+// do_multiply: fuse layernorm * weight  (weight broadcast over rows, src1 / p.ne10)
+// do_add:      fuse + bias              (bias   broadcast over rows, src2 / p.ne20)
+layout (constant_id = 1) const bool do_multiply = false;
+layout (constant_id = 2) const bool do_add = false;
+
 layout(local_size_x = BLOCK_SIZE, local_size_y = 1, local_size_z = 1) in;
 
-layout (binding = 0) readonly buffer X {A_TYPE data_a[];};
-layout (binding = 1) writeonly buffer D {D_TYPE data_d[];};
+shared FLOAT_TYPE sum_x[BLOCK_SIZE];
+shared FLOAT_TYPE sum_xx[BLOCK_SIZE];
 
-shared vec2 sum[BLOCK_SIZE];
+void norm(uint num_iters) {
+    const uint ncols     = p.ne00;
 
-void main() {
-    const uint row = gl_WorkGroupID.z * 262144 + gl_WorkGroupID.y * 512 + gl_WorkGroupID.x;
-    const uint tid = gl_LocalInvocationID.x;
+    const uint row       = gl_WorkGroupID.x;
+    const uint channel   = gl_WorkGroupID.y;
+    const uint samp      = gl_WorkGroupID.z;
+    const uint tid       = gl_LocalInvocationID.x;
+    const uint nchannels = gl_NumWorkGroups.y;
+    const uint nrows     = gl_NumWorkGroups.x;
 
-    sum[tid] = vec2(0.0f, 0.0f);
+    const uint stride_row     = p.nb01;
+    const uint stride_channel = p.nb02;
+    const uint stride_sample  = p.nb03;
 
-    [[unroll]] for (uint col = tid; col < p.KX; col += BLOCK_SIZE) {
-        const float xi = float(data_a[row*p.KX + col]);
-        sum[tid].x += xi;
-        sum[tid].y += xi * xi;
+    // The weight (B) and bias (C) are 1-D row vectors broadcast over every row,
+    // so their per-row base offset is 0 and only the column index (mod ne) is used.
+    uint32_t a_offset = samp*stride_sample + channel*stride_channel + row*stride_row + get_aoffset();
+    uint32_t b_offset = get_boffset();
+    uint32_t d_offset = ((samp*nchannels + channel)*nrows + row)*ncols + get_doffset();
+
+    FLOAT_TYPE sx = FLOAT_TYPE(0.0f);
+    FLOAT_TYPE sxx = FLOAT_TYPE(0.0f);
+
+    [[unroll]] for (uint col = tid, idx = 0; idx < num_iters; col += BLOCK_SIZE, ++idx) {
+        if (col < ncols) {
+            const FLOAT_TYPE xi = FLOAT_TYPE(data_a[a_offset + col]);
+            sx += xi;
+            sxx += xi * xi;
+        }
     }
 
-    // sum up partial sums and write back result
+    sum_x[tid]  = sx;
+    sum_xx[tid] = sxx;
     barrier();
     [[unroll]] for (int s = BLOCK_SIZE / 2; s > 0; s >>= 1) {
         if (tid < s) {
-            sum[tid] += sum[tid + s];
+            sum_x[tid]  += sum_x[tid + s];
+            sum_xx[tid] += sum_xx[tid + s];
         }
         barrier();
     }
 
-    const float mean = sum[0].x / p.KX;
-    const float var = sum[0].y / p.KX - mean * mean;
-    const float inv_std = inversesqrt(var + p.param1);
+    const FLOAT_TYPE mean    = sum_x[0] / FLOAT_TYPE(ncols);
+    const FLOAT_TYPE var     = sum_xx[0] / FLOAT_TYPE(ncols) - mean * mean;
+    const FLOAT_TYPE inv_std = inversesqrt(var + FLOAT_TYPE(p.param1));
 
-    [[unroll]] for (uint col = tid; col < p.KX; col += BLOCK_SIZE) {
-        data_d[row*p.KX + col] = D_TYPE((float(data_a[row*p.KX + col]) - mean) * inv_std);
+    [[unroll]] for (uint col = tid, idx = 0; idx < num_iters; col += BLOCK_SIZE, ++idx) {
+        if (col >= ncols) {
+            continue;
+        }
+        FLOAT_TYPE result = (FLOAT_TYPE(data_a[a_offset + col]) - mean) * inv_std;
+        if (do_multiply) {
+            result *= FLOAT_TYPE(data_b[b_offset + fastmod(col, p.ne10)]);
+        }
+        if (do_add) {
+            result += FLOAT_TYPE(data_c[fastmod(col, p.ne20)]);
+        }
+        data_d[d_offset + col] = D_TYPE(result);
+    }
+}
+
+void main() {
+    // instantiate the norm function for several different
+    // dimensions, to allow loop unrolling
+    uint num_blocks = (p.ne00 + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    if (num_blocks > 32) {
+        norm(num_blocks);
+    } else if (num_blocks > 16) {
+        norm(32);
+    } else if (num_blocks > 12) {
+        norm(16);
+    } else if (num_blocks > 10) {
+        norm(12);
+    } else if (num_blocks > 8) {
+        norm(10);
+    } else if (num_blocks > 4) {
+        norm(8);
+    } else if (num_blocks == 4) {
+        norm(4);
+    } else if (num_blocks == 3) {
+        norm(3);
+    } else if (num_blocks == 2) {
+        norm(2);
+    } else if (num_blocks == 1) {
+        norm(1);
     }
 }
