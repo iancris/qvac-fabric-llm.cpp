@@ -3659,6 +3659,13 @@ static void ggml_vk_load_shaders(vk_device& device) {
             // occupancy on the dominant matmul path. Falls back automatically (shmem check below) if
             // it doesn't fit. Float MMQ path only (q8_0 goes through mul_mat_q_f16).
             l_warptile_mmq = { 512, 128, 128, 32, subgroup_size_8, 32, 2, tm_m, tn_m, tk_m, subgroup_size_8 };
+            // QVAC-21257 Lever A: the explicit-attention matmuls are f32 (QK^T m=1200 n=1200 k=64 -> l
+            // tile; AV m=64 n=1200 k=1200 -> m tile) and ran at only ~69-83 GFLOPS/s while the q8_0
+            // projector matmuls hit ~124 — because the f32 warptiles were left at the generic 8-warp
+            // defaults. Apply the same higher-occupancy 16-wide layout to the f32 tiles. Accuracy-neutral
+            // (blocking/dispatch only); the shmem check below auto-falls-back if a config doesn't fit.
+            l_warptile_f32 = { 512, 128, 128, 32, subgroup_size_8, 32, 2, tm_l_f32, tn_l_f32, tk_l_f32, subgroup_size_8 };
+            m_warptile_f32 = { 256,  64, 128, 32, subgroup_size_8, 32, 2, tm_m_f32, tn_m_f32, tk_m_f32, subgroup_size_8 };
         }
 
         l_wg_denoms     = { l_warptile[1],     l_warptile[2],     1 };
