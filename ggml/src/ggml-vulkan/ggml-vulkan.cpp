@@ -3261,6 +3261,15 @@ static vk_fa_tuning_params get_fa_tuning_params(const vk_device& device, uint32_
         path = FA_SCALAR;
     }
 
+    if (path == FA_COOPMAT1 && device->architecture == vk_device_architecture::QUALCOMM_ADRENO) {
+        // Adreno 830/840 coopmat1 FA triggers ErrorDeviceLost on every inference.
+        // The ROPE fusion, F16 coopmat, and TQ matmul coopmat1 bugs are already
+        // individually patched, but the FA coopmat1 shader itself hangs the GPU.
+        // Force scalar FA which uses smaller per-block writes and avoids the
+        // cooperative matrix instability. Matches the NVIDIA Turing pattern above.
+        path = FA_SCALAR;
+    }
+
     if (path == FA_COOPMAT1) {
         bool shape_ok = (f32acc && device->coopmat_support_16x16x16_f32acc) ||
                         (!f32acc && device->coopmat_support_16x16x16_f16acc);
